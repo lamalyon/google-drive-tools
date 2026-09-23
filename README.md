@@ -1,10 +1,17 @@
 # google-drive-tools
 
-Bulk-import a local CSV into Google Sheets. One table goes in as one values write, not a loop of cell updates.
+Two command-line tools:
 
-Use this when a script (a scraper, an export, an agent) already has a CSV and should drop the whole grid into a spreadsheet. It is not a cell-by-cell writer.
+- `csv_to_sheet.py` — bulk-import a local CSV into a spreadsheet. One table goes in as one values write, not a loop of cell updates.
+- `drive_update_file.py` — replace the bytes of an existing Drive file and keep the same file id and link.
 
-## How the write works
+Use `csv_to_sheet.py` when a script (a scraper, an export, an agent) already has a CSV and should drop the whole grid into a spreadsheet. It is not a cell-by-cell writer.
+
+Use `drive_update_file.py` when the artifact is a file — a Markdown brief, notes, JSON, or a CSV that should stay a file — and the Drive link must stay the same. It does not turn the file into spreadsheet cells. See [Update a Drive file in place](#update-a-drive-file-in-place).
+
+## Import a CSV into Sheets
+
+### How the write works
 
 The Sheets API cannot put cell values inside `spreadsheets.create`, so a new file is two calls:
 
@@ -33,18 +40,20 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Dependencies are pinned in `requirements.txt`: `google-api-python-client` and `google-auth`.
+Dependencies are pinned in `requirements.txt`: `google-api-python-client` and `google-auth`. Both CLIs use those libraries. Nothing else is required.
 
 ## Auth
 
-The CLI never stores credentials. Pass a key you keep locally, or use Application Default Credentials.
+Neither CLI stores credentials. Pass a key you keep locally, or use Application Default Credentials. Do not commit the key, and do not upload it to Drive.
 
 Scopes:
 
-- `https://www.googleapis.com/auth/spreadsheets` — always (create and edit sheets).
-- `https://www.googleapis.com/auth/drive` — only when you pass `--folder-id`, so the new file can be moved into that folder.
+- `https://www.googleapis.com/auth/spreadsheets` — `csv_to_sheet.py` (create and edit sheets).
+- `https://www.googleapis.com/auth/drive` — `csv_to_sheet.py` only when you pass `--folder-id`, so the new spreadsheet can be moved into that folder. `drive_update_file.py` always uses this scope.
 
-Enable the Google Sheets API on the Cloud project. Enable the Google Drive API as well if you use `--folder-id`.
+`drive_update_file.py` uses the full Drive scope on purpose. The narrower `drive.file` scope only covers files the app created or that a user opened with the app. A file you share with a service account from the Drive sharing dialog is not in that set, so an update returns 404. The `drive` scope can update a file shared with the caller as an Editor.
+
+Enable the Google Sheets API on the Cloud project for `csv_to_sheet.py`. Enable the Google Drive API for `drive_update_file.py`, and for `csv_to_sheet.py` if you use `--folder-id`.
 
 ### Service account
 
@@ -66,6 +75,7 @@ Share the destination with the service account email (`client_email` in the JSON
 
 - Existing spreadsheet: share that file.
 - New spreadsheet: pass `--folder-id` for a folder shared with the service account. Otherwise the new file is owned by the service account and lives in its Drive, not yours. The command still prints the URL and id.
+- Existing Drive file (Markdown and other files): share that file, then update it with `drive_update_file.py`. Service accounts have no My Drive storage quota, so they cannot create a new file in your My Drive. Updating a file you own works. See [Update a Drive file in place](#update-a-drive-file-in-place).
 
 You do not need domain-wide delegation.
 
@@ -84,7 +94,7 @@ gcloud auth application-default set-quota-project YOUR_PROJECT_ID
 
 A spreadsheet created this way is owned by your user.
 
-## Examples
+## Sheet examples
 
 Parse only. No credentials and no Google calls:
 
@@ -147,7 +157,7 @@ Numbers and dates are parsed by Sheets (`--value-input USER_ENTERED`, the defaul
 
 `--dry-run` reports the CSV size. A live replace may write a larger range when it blanks leftover cells.
 
-## Errors
+## Sheet import errors
 
 | Exit | When |
 | --- | --- |
@@ -159,10 +169,82 @@ Messages go to stderr and start with `error:`. A 403 names the service account e
 
 Tab names cannot contain `: \ / ? * [ ]`.
 
+## Update a Drive file in place
+
+`drive_update_file.py` calls Drive `files.update` with a media upload for a file id you already have. The id and the link stay the same. The command does not create a file and does not trash one.
+
+| You have | Use |
+| --- | --- |
+| Rows that should become spreadsheet cells (replace a tab, append rows, or create a Sheet) | `csv_to_sheet.py` |
+| A file whose bytes should change and whose Drive link must not (a Markdown brief, text, JSON, or a CSV kept as a file) | `drive_update_file.py` |
+
+Service accounts have no My Drive storage quota. Creating a file in a user's My Drive fails for them. This path avoids that:
+
+1. As your user (the Drive website, or user credentials), create or upload the file once. An empty `BRIEF.md` is enough. Copy the file id from the link `https://drive.google.com/file/d/FILE_ID/view`. Pass that id, not the whole URL.
+2. Share that file with the service account email (`client_email` in the JSON key) as an **Editor**.
+3. Refresh the content in place whenever the local file changes.
+
+The target should be a normal Drive file (for example a `.md` file stored as `text/markdown`). This tool replaces that file's bytes. It does not edit the body of a native Google Doc. Spreadsheet cells still go through `csv_to_sheet.py`.
+
+Check the local file without credentials and without calling Google:
+
+```bash
+python drive_update_file.py BRIEF.md --file-id FILE_ID --dry-run
+```
+
+```
+Dry run: no Google API calls
+path: BRIEF.md
+size: 128
+mime: text/markdown
+file_id: FILE_ID
+```
+
+Upload the new bytes. `--credentials` wins over `GOOGLE_APPLICATION_CREDENTIALS`. Omit it to use Application Default Credentials.
+
+```bash
+python drive_update_file.py BRIEF.md \
+  --file-id FILE_ID \
+  --credentials /path/to/service-account.json
+```
+
+Same thing as a module:
+
+```bash
+python -m drive_update_file BRIEF.md --file-id FILE_ID
+```
+
+Leave the Drive title as it is, or set a new one with `--name`. The default media type comes from the file name (`text/markdown` for `.md` and `.markdown`, `text/plain` for `.txt`, `text/csv` for `.csv`, `application/json` for `.json`). Override it with `--mime-type` when the name is not enough.
+
+```bash
+python drive_update_file.py BRIEF.md \
+  --file-id FILE_ID \
+  --name "March brief"
+```
+
+Files under 5 MiB upload as multipart. Larger files use a resumable upload. Both are one `files.update` of the same file id.
+
+On success the command prints two lines and exits 0. The first line is the file's `webViewLink` when Drive returns one:
+
+```
+https://drive.google.com/file/d/FILE_ID/view
+id: FILE_ID
+```
+
+Keep keys off Drive and out of git. The command replaces whatever file id you pass with the local bytes, so point it at the brief, not at a service-account JSON file or a `.env`.
+
+| Exit | When |
+| --- | --- |
+| 0 | Updated the file, or dry-run succeeded |
+| 2 | Missing local file, empty `--file-id`, bad flags, missing credentials path |
+| 1 | Auth failure or a Google API error |
+
+Messages go to stderr and start with `error:`. A 403 or 404 names the service account email when there is one, and tells you to share the file with it as an Editor.
+
 ## Tests
 
 ```bash
 python -m unittest discover -s tests -t .
 ```
 
-Parsing tests and `--dry-run` do not call Google. Write tests pass a fake Sheets client and assert a single `values.update` or `values.append` for the whole table.
+Parsing tests and `--dry-run` do not call Google. Sheet write tests pass a fake Sheets client and assert a single `values.update` or `values.append` for the whole table. Drive tests pass a fake Drive client and assert a single `files.update` media upload for the given file id.
