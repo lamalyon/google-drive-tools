@@ -248,6 +248,21 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertIn("not valid JSON", stderr.getvalue())
 
+    def test_missing_adc_still_mentions_sheets_scope(self) -> None:
+        from google.auth.exceptions import DefaultCredentialsError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, "ok.csv", "a\n1\n")
+            stderr = io.StringIO()
+            with patch(
+                "google.auth.default",
+                side_effect=DefaultCredentialsError("no creds"),
+            ):
+                with redirect_stderr(stderr):
+                    code = main([str(path), "--title", "T"])
+        self.assertEqual(code, 1)
+        self.assertIn("the Sheets scope", stderr.getvalue())
+
 
 class WriteTests(unittest.TestCase):
     def _creds(self):

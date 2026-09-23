@@ -20,8 +20,14 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from google_clients import (
+    DRIVE_SCOPE,
+    GoogleClientError,
+    load_credentials as _load_google_credentials,
+    short_error as _short,
+)
+
 SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
-DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
 
 # Sheets rejects a spreadsheet larger than this, or wider than A1:ZZZ.
 MAX_CELLS = 10_000_000
@@ -176,13 +182,6 @@ def scopes_for(*, folder_id: str | None) -> list[str]:
     return scopes
 
 
-def _short(exc: BaseException, limit: int = 400) -> str:
-    text = str(exc).replace("\n", " ").strip()
-    if len(text) > limit:
-        return text[:limit] + "..."
-    return text
-
-
 def access_hint(status: int | None, service_account_email: str | None) -> str:
     """Extra sentence for auth and permission failures. Empty if not applicable."""
     if status == 404:
@@ -209,54 +208,10 @@ def load_credentials(path: str | None, scopes: list[str]):
     ``--credentials`` wins over ``GOOGLE_APPLICATION_CREDENTIALS``. When no
     path is passed, ``google.auth.default`` still reads that env var.
     """
-    cred_path: Path | None = None
-    if path:
-        cred_path = Path(path).expanduser()
-        if not cred_path.is_file():
-            raise CsvImportError(f"Credentials file not found: {cred_path}")
-
     try:
-        import google.auth
-        from google.auth.exceptions import DefaultCredentialsError, GoogleAuthError
-    except ImportError as exc:
-        raise CsvImportError(
-            "Google client libraries are not installed. "
-            "Run: pip install -r requirements.txt",
-            exit_code=1,
-        ) from exc
-
-    try:
-        if cred_path is not None:
-            creds, _project = google.auth.load_credentials_from_file(
-                str(cred_path), scopes=scopes
-            )
-        else:
-            creds, _project = google.auth.default(scopes=scopes)
-    except DefaultCredentialsError as exc:
-        if cred_path is not None:
-            detail = _short(exc)
-            if "not a valid json" in detail.lower():
-                raise CsvImportError(
-                    f"Credentials file is not valid JSON: {cred_path}",
-                    exit_code=1,
-                ) from exc
-            raise CsvImportError(
-                f"Could not load Google credentials from {cred_path}: {detail}",
-                exit_code=1,
-            ) from exc
-        raise CsvImportError(
-            "Could not find Google credentials. Pass --credentials, set "
-            "GOOGLE_APPLICATION_CREDENTIALS to a service-account JSON file, "
-            "or run `gcloud auth application-default login` with the Sheets "
-            f"scope. Details: {_short(exc)}",
-            exit_code=1,
-        ) from exc
-    except (GoogleAuthError, ValueError, OSError) as exc:
-        raise CsvImportError(
-            f"Could not load Google credentials: {_short(exc)}",
-            exit_code=1,
-        ) from exc
-    return creds
+        return _load_google_credentials(path, scopes, adc_scope_hint="the Sheets scope")
+    except GoogleClientError as exc:
+        raise CsvImportError(str(exc), exit_code=exc.exit_code) from exc
 
 
 def build_services(creds, *, need_drive: bool):
